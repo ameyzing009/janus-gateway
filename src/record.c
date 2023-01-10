@@ -79,6 +79,7 @@ static void janus_recorder_free(const janus_refcount *recorder_ref) {
 	recorder->fmtp = NULL;
 	if(recorder->extensions != NULL)
 		g_hash_table_destroy(recorder->extensions);
+	janus_mutex_destroy(&recorder->mutex);
 	g_free(recorder);
 }
 
@@ -97,7 +98,7 @@ janus_recorder *janus_recorder_create_full(const char *dir, const char *codec, c
 		type = JANUS_RECORDER_VIDEO;
 	} else if(!strcasecmp(codec, "opus") || !strcasecmp(codec, "multiopus")
 			|| !strcasecmp(codec, "g711") || !strcasecmp(codec, "pcmu") || !strcasecmp(codec, "pcma")
-			|| !strcasecmp(codec, "g722")) {
+			|| !strcasecmp(codec, "g722") || !strcasecmp(codec, "l16-48") || !strcasecmp(codec, "l16")) {
 		type = JANUS_RECORDER_AUDIO;
 	} else if(!strcasecmp(codec, "text") || !strcasecmp(codec, "binary")) {
 		/* Data channels may be text or binary, so that's what we can save too */
@@ -116,7 +117,9 @@ janus_recorder *janus_recorder_create_full(const char *dir, const char *codec, c
 	rc->file = NULL;
 	rc->codec = g_strdup(codec);
 	rc->fmtp = fmtp ? g_strdup(fmtp) : NULL;
+	rc->description = NULL;
 	rc->created = janus_get_real_time();
+	janus_mutex_init(&rc->mutex);
 	const char *rec_dir = NULL;
 	const char *rec_file = NULL;
 	char *copy_for_parent = NULL;
@@ -248,7 +251,6 @@ janus_recorder *janus_recorder_create_full(const char *dir, const char *codec, c
 	g_atomic_int_set(&rc->writable, 1);
 	/* We still need to also write the info header first */
 	g_atomic_int_set(&rc->header, 0);
-	janus_mutex_init(&rc->mutex);
 	/* Done */
 	g_atomic_int_set(&rc->destroyed, 0);
 	g_free(copy_for_parent);
@@ -288,6 +290,21 @@ int janus_recorder_add_extmap(janus_recorder *recorder, int id, const char *extm
 	if(recorder->extensions == NULL)
 		recorder->extensions = g_hash_table_new_full(NULL, NULL, NULL, (GDestroyNotify)g_free);
 	g_hash_table_insert(recorder->extensions, GINT_TO_POINTER(id), g_strdup(extmap));
+	janus_mutex_unlock_nodebug(&recorder->mutex);
+	return 0;
+}
+
+int janus_recorder_description(janus_recorder *recorder, const char *description) {
+	if(!recorder || !description)
+		return -1;
+	janus_mutex_lock_nodebug(&recorder->mutex);
+	if(g_atomic_int_get(&recorder->header)) {
+		/* No use setting description once it's already written in the MJR file */
+		janus_mutex_unlock_nodebug(&recorder->mutex);
+		return 0;
+	}
+	g_free(recorder->description);
+	recorder->description = g_strdup(description);
 	janus_mutex_unlock_nodebug(&recorder->mutex);
 	return 0;
 }
@@ -348,6 +365,8 @@ int janus_recorder_save_frame(janus_recorder *recorder, char *buffer, uint lengt
 		json_object_set_new(info, "c", json_string(recorder->codec));					/* Media codec */
 		if(recorder->fmtp)
 			json_object_set_new(info, "f", json_string(recorder->fmtp));				/* Codec-specific info */
+		if(recorder->description)
+			json_object_set_new(info, "d", json_string(recorder->description));		/* Stream description */
 		if(recorder->extensions) {
 			/* Add the extmaps to the JSON object */
 			json_t *extmaps = NULL;
